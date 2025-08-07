@@ -6,9 +6,9 @@ import pandas as pd
 import json
 import datetime
 
-st.set_page_config(page_title="Comparateur Structuré de Données", layout="wide")
+st.set_page_config(page_title="🚀 Structured Data Analyser", layout="wide")
 
-st.title("📊 Comparateur Structuré de Données JSON-LD")
+st.title("🚀 Structured Data Analyser")
 
 def extract_jsonld_schema(html_content, url="http://example.com"):
     base_url = get_base_url(html_content, url)
