@@ -5,3 +5,4 @@ extruct
 w3lib
 pandas
 lxml
+httpx[http2]
