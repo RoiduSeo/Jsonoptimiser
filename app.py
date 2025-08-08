@@ -28,9 +28,11 @@ for item_type, prop in sorted(all_keys):
 # on force les colonnes attendues (même si rows est vide)
 expected_cols = ["Type", "Propriété", "Votre site"] + competitor_names
 df = pd.DataFrame(rows)
+
+# ⚠️ Ne pas faire df[c] = [] (erreur de longueur). Utiliser une valeur scalaire.
 for c in expected_cols:
     if c not in df.columns:
-        df[c] = []
+        df[c] = ""  # ou np.nan
 
 # ------------------------
 # 📊 TABLEAU COMPARATIF PAR TYPE (sécurisé)
@@ -47,4 +49,16 @@ else:
     grouped = df.groupby("Type", dropna=False)
 
     def colorize(val):
-        return "color: green" if val == "✅" else "color: r
+        if val == "✅":
+            return "color: green"
+        elif val == "❌":
+            return "color: red"
+        return ""
+
+    for t, sub in grouped:
+        st.markdown(f"#### {t}")
+        check_cols = ["Votre site"] + [name for name in competitor_names if name in sub.columns]
+        cols_to_show = ["Propriété"] + check_cols
+
+        styled = sub[cols_to_show].style.applymap(colorize, subset=check_cols)
+        st.dataframe(styled, use_container_width=True)
