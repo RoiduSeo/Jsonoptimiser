@@ -1,6 +1,8 @@
 streamlit
+pandas
+httpx
+requests
 beautifulsoup4
+lxml
 extruct
 w3lib
-lxml
-pandas
