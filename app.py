@@ -1,159 +1,117 @@
 # ========================
-#  ⚙️ Comparatif JSON-LD complet
+#  🚀 Structured Data Analyser (URLs + HTML)
 # ========================
-import pandas as pd
 import streamlit as st
+from bs4 import BeautifulSoup
+import extruct
+from w3lib.html import get_base_url
+import pandas as pd
+import json
+import datetime
+import requests
+from urllib.parse import urlparse
+import urllib.robotparser as robotparser
 
-# -------------------------------------------------
-# 🔧 Fonction utilitaire : normaliser un schéma en paires (Type, Propriété)
-# -------------------------------------------------
-def extract_pairs(schema):
-    """
-    Transforme un schéma en set de paires (item_type, prop).
-    Formats acceptés :
-      - set({("Product","name"), ...})
-      - list([("Product","name"), ...])
-      - dict({"Product": ["name","price"], "Offer": {"price": "..."} })
-      - dict({"Product": {"name": True, "price": True}})
-    """
-    pairs = set()
-    if not schema:
-        return pairs
+st.set_page_config(page_title="🚀 Structured Data Analyser", layout="wide")
+st.title("🚀 Structured Data Analyser")
 
-    # set de tuples
-    if isinstance(schema, set):
-        for x in schema:
-            if isinstance(x, tuple) and len(x) == 2:
-                pairs.add((str(x[0]), str(x[1])))
-        return pairs
+# ------------------------
+# 🌐 Récupération HTML avec respect de robots.txt
+# ------------------------
+DEFAULT_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/122.0 Safari/537.36 (StructuredDataAnalyser/1.0)"
+)
 
-    # liste de tuples
-    if isinstance(schema, list):
-        for x in schema:
-            if isinstance(x, tuple) and len(x) == 2:
-                pairs.add((str(x[0]), str(x[1])))
-        return pairs
+def is_allowed_by_robots(url: str, user_agent: str = DEFAULT_UA) -> bool:
+    try:
+        parsed = urlparse(url)
+        robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
+        rp = robotparser.RobotFileParser()
+        rp.set_url(robots_url)
+        rp.read()
+        return rp.can_fetch(user_agent, url)
+    except Exception:
+        # Si robots.txt illisible, on suppose autorisé (comportement standard de nombreux clients)
+        return True
 
-    # dict
-    if isinstance(schema, dict):
-        for item_type, props in schema.items():
-            if props is None:
-                continue
-            if isinstance(props, dict):
-                iterable = props.keys()
-            elif isinstance(props, (list, set, tuple)):
-                iterable = props
-            else:
-                iterable = [props]
-            for p in iterable:
-                if p is None:
-                    continue
-                pairs.add((str(item_type), str(p)))
-        return pairs
+def fetch_html(url: str, user_agent: str = DEFAULT_UA, timeout: int = 15) -> str:
+    if not url:
+        return ""
+    # Respect robots.txt
+    if not is_allowed_by_robots(url, user_agent):
+        raise PermissionError(f"L’accès à {url} est refusé par robots.txt.")
+    headers = {"User-Agent": user_agent, "Accept": "text/html,application/xhtml+xml"}
+    resp = requests.get(url, headers=headers, timeout=timeout)
+    resp.raise_for_status()
+    # Nettoyage léger
+    content = resp.text or ""
+    # Certaines pages renvoient du XML/xhtml, on garde tel quel
+    return content
 
-    # Autres formats : ignorés
-    return pairs
-
-# -------------------------------------------------
-# 🧱 Sécurisation des entrées
-# -------------------------------------------------
-client_schema = client_schema if 'client_schema' in globals() else None
-competitor_schemas = competitor_schemas if 'competitor_schemas' in globals() else []
-competitor_names = competitor_names if 'competitor_names' in globals() else []
-
-# Normalisation des noms concurrents
-safe_competitor_names = []
-for i, name in enumerate(competitor_names or []):
-    nm = name or f"Concurrent {i+1}"
-    if nm in safe_competitor_names:
-        nm = f"{nm} ({i+1})"
-    safe_competitor_names.append(nm)
-
-# Complète si moins de noms que de schémas
-while len(safe_competitor_names) < len(competitor_schemas):
-    safe_competitor_names.append(f"Concurrent {len(safe_competitor_names)+1}")
-
-# -------------------------------------------------
-# 🧮 Construction des paires et de all_keys
-# -------------------------------------------------
-client_pairs = extract_pairs(client_schema)
-competitor_pairs_list = [extract_pairs(s) for s in competitor_schemas]
-
-all_keys = set(client_pairs)
-for s in competitor_pairs_list:
-    all_keys |= s
-
-# -------------------------------------------------
-# 📋 Construction du DataFrame
-# -------------------------------------------------
-rows = []
-missing_opportunities = []
-
-for item_type, prop in sorted(all_keys):
-    row = {
-        "Type": item_type,
-        "Propriété": prop,
-        "Votre site": "✅" if (item_type, prop) in client_pairs else "❌"
-    }
-    at_least_one_has_it = False
-
-    for i, schema_pairs in enumerate(competitor_pairs_list):
-        has_it = "✅" if (item_type, prop) in schema_pairs else "❌"
-        if has_it == "✅":
-            at_least_one_has_it = True
-        row[safe_competitor_names[i]] = has_it
-
-    if row["Votre site"] == "❌" and at_least_one_has_it:
-        missing_opportunities.append((item_type, prop))
-
-    rows.append(row)
-
-expected_cols = ["Type", "Propriété", "Votre site"] + safe_competitor_names
-df = pd.DataFrame(rows)
-
-# Ajoute colonnes manquantes si besoin
-for c in expected_cols:
-    if c not in df.columns:
-        df[c] = ""
-
-# Réordonne
-df = df[expected_cols]
-
-# -------------------------------------------------
-# 🎨 Fonction de coloration
-# -------------------------------------------------
-def colorize(val):
-    if val == "✅":
-        return "color: green"
-    elif val == "❌":
-        return "color: red"
-    return ""
-
-# -------------------------------------------------
-# 📊 Affichage Streamlit
-# -------------------------------------------------
-st.subheader("🧩 Données comparées par type")
-
-if df.empty or "Type" not in df.columns:
-    st.info(
-        "Aucune donnée structurée JSON-LD détectée pour ces URLs. "
-        "Essaie avec une **fiche produit** ou colle le **HTML** en fallback."
+# ------------------------
+# 🔎 Extraction JSON-LD + flatten
+# ------------------------
+def extract_jsonld_schema(html_content: str, url: str = "http://example.com"):
+    base_url = get_base_url(html_content, url)
+    data = extruct.extract(
+        html_content,
+        base_url=base_url,
+        syntaxes=["json-ld"],
+        uniform=True
     )
-else:
-    grouped = df.groupby("Type", dropna=False)
+    return data.get("json-ld", [])
 
-    for t, sub in grouped:
-        st.markdown(f"#### {t}")
-        check_cols = ["Votre site"] + [name for name in safe_competitor_names if name in sub.columns]
-        cols_to_show = ["Propriété"] + check_cols
+def flatten_schema(jsonld_data):
+    """
+    Retourne un set de paires (Type, Propriété).
+    On stocke toujours ('Type', '@type') et chaque clé rencontrée pour ce type.
+    """
+    results = set()
+    def recurse(obj, current_type=None):
+        if isinstance(obj, dict):
+            obj_type = obj.get('@type', current_type)
+            if obj_type:
+                results.add((obj_type, '@type'))
+            for key, value in obj.items():
+                if key != '@type':
+                    # Si pas de type courant, on étiquette sous 'Unknown'
+                    tag_type = obj_type or "Unknown"
+                    results.add((tag_type, key))
+                    recurse(value, obj_type)
+        elif isinstance(obj, list):
+            for item in obj:
+                recurse(item, current_type)
+    recurse(jsonld_data)
+    return results
 
-        styled = sub[cols_to_show].style.applymap(colorize, subset=check_cols)
-        st.dataframe(styled, use_container_width=True)
+# ------------------------
+# 🟢 SAISIE
+# ------------------------
+st.header("🟢 Votre site")
+col1, col2 = st.columns(2)
+with col1:
+    client_url = st.text_input("URL de la page (votre site)", placeholder="https://…")
+with col2:
+    client_html = st.text_area("OU collez l’HTML de la page (prioritaire si rempli)", height=160)
 
-# -------------------------------------------------
-# 💡 Opportunités manquantes
-# -------------------------------------------------
-if missing_opportunities:
-    with st.expander("💡 Opportunités manquantes (présentes chez au moins un concurrent)"):
-        opp_df = pd.DataFrame(sorted(missing_opportunities), columns=["Type", "Propriété"])
-        st.dataframe(opp_df, use_container_width=True)
+st.header("🔴 Concurrents")
+competitor_count = st.number_input("Nombre de concurrents", min_value=1, max_value=5, value=1, step=1)
+
+competitor_inputs = []
+for i in range(competitor_count):
+    st.markdown(f"**Concurrent {i+1}**")
+    c1, c2 = st.columns(2)
+    with c1:
+        name = st.text_input(f"Nom Concurrent {i+1}", key=f"name_{i}", value=f"Concurrent {i+1}")
+        url = st.text_input(f"URL Concurrent {i+1}", key=f"url_{i}", placeholder="https://…")
+    with c2:
+        html = st.text_area(f"OU HTML Concurrent {i+1}", key=f"html_{i}", height=140)
+    competitor_inputs.append((name, url, html))
+
+st.caption("💡 L’outil tente de télécharger les pages. Si une page est protégée (paywall, auth, CAPTCHA, ou interdite via robots.txt), colle le HTML manuellement.")
+
+# ------------------------
+# 🔍 COMPARAISON
+# --------------
