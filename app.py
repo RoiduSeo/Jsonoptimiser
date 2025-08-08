@@ -1,23 +1,47 @@
-# --- en haut des imports
+# --- imports
 import time
+import streamlit as st
+import httpx
 from httpx import Timeout
 
-# --- options UI (dans la sidebar de préférence)
+# --- options UI (dans la sidebar)
 with st.sidebar:
     st.header("⚙️ Options réseau")
     TIMEOUT_S = st.slider("Timeout (secondes)", 5, 60, 25, 1)
     RETRIES = st.slider("Retries", 0, 5, 2, 1)
-    RENDER_JS = st.checkbox("Rendre le JS (Playwright) [expérimental]", value=False,
-                            help="À activer plus tard, nécessite Playwright sur l’hébergement.")
+    RENDER_JS = st.checkbox(
+        "Rendre le JS (Playwright) [expérimental]",
+        value=False,
+        help="À activer plus tard, nécessite Playwright sur l’hébergement."
+    )
 
-# --- remplace fetch_url_html par ceci
 @st.cache_data(show_spinner=False, ttl=60 * 60)
-def fetch_url_html(url: str, timeout_s: int = 25, retries: int = 2) -> str:
+def fetch_url_html(
+    url: str,
+    timeout_s: int = 25,
+    retries: int = 2,
+    render_js: bool = False  # réservé pour une future intégration Playwright
+) -> str:
+    """
+    Télécharge le HTML d'une URL avec en-têtes réalistes, timeouts fins et retries.
+
+    Args:
+        url: URL cible (avec ou sans schéma).
+        timeout_s: timeout de lecture (seconds).
+        retries: nombre de tentatives (backoff simple).
+        render_js: placeholder pour un rendu JS futur (non utilisé ici).
+
+    Returns:
+        Le HTML de la page sous forme de chaîne.
+
+    Raises:
+        Exception si toutes les tentatives échouent.
+    """
+    # Normalisation du schéma
     if not url.lower().startswith(("http://", "https://")):
         url = "https://" + url
 
     headers = {
-        # UA réaliste
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -36,22 +60,25 @@ def fetch_url_html(url: str, timeout_s: int = 25, retries: int = 2) -> str:
             t = Timeout(connect=10.0, read=timeout_s, write=20.0, pool=5.0)
             with httpx.Client(follow_redirects=True, headers=headers, timeout=t, http2=True) as client:
                 resp = client.get(url)
-                # Quelques sites renvoient 403/429: on tente un 2e UA simplifié en retry
+                # Si erreur HTTP -> lève pour passer au retry
                 if resp.status_code >= 400:
                     resp.raise_for_status()
                 html = resp.text
 
-                # Détection basique des pages anti-bot
-                if any(x in html.lower() for x in [
-                    "bot detection", "are you a robot", "captcha", "automated access", "to discuss automated access"
-                ]):
+                # Détection basique anti-bot
+                lower = html.lower()
+                if any(
+                    s in lower
+                    for s in ("bot detection", "are you a robot", "captcha", "automated access", "to discuss automated access")
+                ):
                     raise RuntimeError("Page protégée (anti-bot)")
+
                 return html
 
         except Exception as e:
             last_err = e
-            # backoff simple
+            # backoff simple progressif
             time.sleep(1.5 * (attempt + 1))
 
-    # si tous les essais échouent:
+    # si tous les essais échouent
     raise last_err
