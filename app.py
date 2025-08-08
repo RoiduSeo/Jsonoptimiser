@@ -1,5 +1,5 @@
 # =====================================================
-# 🚀 Structured Data Analyser — ignore toujours robots.txt
+# 🚀 Structured Data Analyser — anti-timeout & robots.txt ignoré
 # =====================================================
 import streamlit as st
 import extruct
@@ -10,6 +10,7 @@ import datetime
 import time
 import random
 import requests
+import re
 from urllib.parse import urlparse
 
 # ---------------------------
@@ -30,11 +31,11 @@ st.markdown(COMPACT_CSS, unsafe_allow_html=True)
 st.markdown("## 🚀 Structured Data Analyser")
 
 # ------------------------
-# 🌐 Récup HTML (robots.txt ignoré) + headers “navigateur”
+# 🌐 Récup HTML rapide (robots.txt ignoré)
 # ------------------------
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
 def build_headers(url, ua=DEFAULT_UA):
@@ -46,66 +47,105 @@ def build_headers(url, ua=DEFAULT_UA):
         "Referer": origin,
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
-        "sec-ch-ua": '"Chromium";v="123", "Not:A-Brand";v="8"',
+        "sec-ch-ua": '"Chromium";v="124", "Not:A-Brand";v="8"',
         "sec-ch-ua-mobile": "?0",
         "sec-ch-ua-platform": '"Windows"',
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "same-origin",
-        "Sec-Fetch-User": "?1",
         "Upgrade-Insecure-Requests": "1",
     }
 
-def smart_get(session: requests.Session, url: str, timeout: int = 15) -> requests.Response:
-    variants = [url]
+def url_variants(url):
+    v = [url]
     if not url.endswith("/"):
-        variants.append(url + "/")
+        v.append(url + "/")
     if "?" in url:
-        variants.append(url + "&amp=1")
+        v.append(url + "&amp=1")
     else:
-        variants.append(url + "?amp=1")
+        v.append(url + "?amp=1")
     if not url.rstrip("/").endswith("/amp"):
-        variants.append(url.rstrip("/") + "/amp")
+        v.append(url.rstrip("/") + "/amp")
+    return v
 
-    last_exc = None
-    tried = set()
-    for u in variants:
-        if u in tried: continue
-        tried.add(u)
-        headers = build_headers(u)
+# Extraction rapide des blocs JSON-LD par regex
+JSONLD_RE = re.compile(
+    r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+    re.IGNORECASE | re.DOTALL
+)
+
+def fast_extract_jsonld_blocks(html):
+    blocks = []
+    for m in JSONLD_RE.finditer(html or ""):
+        raw = m.group(1).strip()
+        raw = raw.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
         try:
-            resp = session.get(u, headers=headers, allow_redirects=True, timeout=timeout)
-            ctype = (resp.headers.get("content-type") or "").lower()
-            if 200 <= resp.status_code < 300 and ("text/html" in ctype or "application/xhtml+xml" in ctype):
-                return resp
-            if resp.status_code in (403, 406, 451):
-                time.sleep(0.4 + random.random() * 0.6)
+            data = json.loads(raw)
+        except Exception:
+            try:
+                data = json.loads(f"[{raw}]")
+            except Exception:
                 continue
+        if isinstance(data, list):
+            blocks.extend(data)
+        else:
+            blocks.append(data)
+    return blocks
+
+@st.cache_data(show_spinner=False, ttl=900)
+def fetch_jsonld_quick(url: str, max_bytes: int = 2_000_000, timeout_connect: int = 6, timeout_read: int = 6):
+    with requests.Session() as s:
+        s.headers.update(build_headers(url))
+        r = s.get(url, stream=True, timeout=(timeout_connect, timeout_read), allow_redirects=True)
+        r.raise_for_status()
+        chunks = []
+        size = 0
+        for chunk in r.iter_content(chunk_size=32_768):
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+            if size >= max_bytes:
+                break
+        html = b"".join(chunks).decode(r.apparent_encoding or "utf-8", errors="replace")
+        blocks = fast_extract_jsonld_blocks(html)
+        return blocks, html
+
+@st.cache_data(show_spinner=False, ttl=900)
+def fetch_jsonld_with_variants(url: str):
+    last_exc = None
+    for u in url_variants(url):
+        try:
+            blocks, _ = fetch_jsonld_quick(u)
+            if blocks:
+                return blocks
+            time.sleep(0.2 + random.random() * 0.3)
         except Exception as e:
             last_exc = e
             time.sleep(0.2)
             continue
     if last_exc:
         raise last_exc
-    raise requests.HTTPError(f"Échec de récupération (403/variants) pour {url}")
+    return []
 
 @st.cache_data(show_spinner=False, ttl=900)
-def fetch_html(url: str, timeout: int = 15) -> str:
-    if not url:
-        return ""
+def fetch_full_html(url: str, timeout_connect: int = 6, timeout_read: int = 25) -> str:
     with requests.Session() as s:
         s.headers.update(build_headers(url))
-        resp = smart_get(s, url, timeout=timeout)
-        resp.raise_for_status()
-        return resp.text or ""
+        r = s.get(url, timeout=(timeout_connect, timeout_read), allow_redirects=True)
+        r.raise_for_status()
+        return r.text
 
 # ------------------------
-# 🔎 Extraction JSON-LD + flatten
+# JSON-LD extraction
 # ------------------------
 def extract_jsonld_schema(html_content: str, url: str = "http://example.com"):
-    base_url = get_base_url(html_content, url)
-    data = extruct.extract(html_content, base_url=base_url, syntaxes=["json-ld"], uniform=True)
-    return data.get("json-ld", [])
+    blocks = fast_extract_jsonld_blocks(html_content)
+    if blocks:
+        return blocks
+    try:
+        base_url = get_base_url(html_content, url)
+        data = extruct.extract(html_content, base_url=base_url, syntaxes=['json-ld'], uniform=True)
+        return data.get('json-ld', [])
+    except Exception:
+        return []
 
 def flatten_schema(jsonld_data):
     results = set()
@@ -125,12 +165,30 @@ def flatten_schema(jsonld_data):
     return results
 
 @st.cache_data(show_spinner=False, ttl=900)
-def build_pairs_from_html(html: str, url: str):
-    data = extract_jsonld_schema(html, url=url)
+def build_pairs_from_url(url: str):
+    # Essai rapide
+    try:
+        blocks = fetch_jsonld_with_variants(url)
+        if blocks:
+            return flatten_all(blocks)
+    except Exception:
+        pass
+    # Full page fallback
+    html_full = fetch_full_html(url)
+    blocks = extract_jsonld_schema(html_full, url=url)
+    return flatten_all(blocks)
+
+@st.cache_data(show_spinner=False, ttl=900)
+def flatten_all(blocks):
     pairs = set()
-    for block in data:
+    for block in blocks:
         pairs |= flatten_schema(block)
     return pairs
+
+@st.cache_data(show_spinner=False, ttl=900)
+def build_pairs_from_html(html: str, url: str):
+    blocks = extract_jsonld_schema(html, url=url)
+    return flatten_all(blocks)
 
 def colorize(val):
     if val == "✅": return "color: green"
@@ -177,16 +235,12 @@ with left:
 # ------------------------
 def analyze_once(client_url, client_html, competitor_entries):
     if client_html.strip():
-        client_html_final = client_html
-        client_eff_url = client_url or "http://example.com"
+        client_pairs = build_pairs_from_html(client_html, client_url or "http://example.com")
     elif client_url.strip():
-        client_html_final = fetch_html(client_url)
-        client_eff_url = client_url
+        client_pairs = build_pairs_from_url(client_url)
     else:
         st.error("Merci de fournir au moins l’URL ou l’HTML de votre page.")
         st.stop()
-
-    client_pairs = build_pairs_from_html(client_html_final, client_eff_url)
 
     competitor_names = []
     competitor_pairs_list = []
@@ -197,16 +251,13 @@ def analyze_once(client_url, client_html, competitor_entries):
         competitor_names.append(comp_name)
         try:
             if html.strip():
-                comp_html = html
-                comp_eff_url = url or "http://example.com"
+                pairs = build_pairs_from_html(html, url or "http://example.com")
             elif url.strip():
-                comp_html = fetch_html(url)
-                comp_eff_url = url
+                pairs = build_pairs_from_url(url)
             else:
                 st.warning(f"[{comp_name}] Pas d’URL ni HTML — ignoré.")
                 competitor_pairs_list.append(set())
                 continue
-            pairs = build_pairs_from_html(comp_html, comp_eff_url)
         except Exception as e:
             st.warning(f"[{comp_name}] Erreur : {e}")
             pairs = set()
@@ -225,8 +276,7 @@ def analyze_once(client_url, client_html, competitor_entries):
         for i, pairs in enumerate(competitor_pairs_list):
             has_it = "✅" if (item_type, prop) in pairs else "❌"
             if has_it == "✅": at_least_one = True
-            name = competitor_names[i]
-            row[name] = has_it
+            row[competitor_names[i]] = has_it
         if row["Votre site"] == "❌" and at_least_one:
             missing.append((item_type, prop))
         rows.append(row)
@@ -263,7 +313,6 @@ with right:
             selected_type = st.selectbox("Types détectés", options=["(Tous)"] + types, index=0)
         with sel_col2:
             if selected_type != "(Tous)":
-                st.markdown(f"#### 📂 {selected_type}")
                 sub = view_df[view_df["Type"] == selected_type].copy()
                 check_cols = [c for c in sub.columns if c not in ("Type", "Propriété")]
                 styled = sub[["Propriété"] + check_cols].style.applymap(colorize, subset=check_cols)
