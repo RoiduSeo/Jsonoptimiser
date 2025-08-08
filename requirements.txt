@@ -1,6 +1,7 @@
 streamlit
+httpx
 beautifulsoup4
 extruct
 w3lib
-lxml
 pandas
+lxml
